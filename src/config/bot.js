@@ -24,7 +24,7 @@ export const botConfig = {
     activities: [
       {
         name: "Custom Status", // required by Discord API, not shown in the client
-        state: "Made By PainXD_",     // this is what people actually see
+        state: "pelixbot.ai.studio",     // this is what people actually see
         type: 4,               // Custom
       },
     ],
