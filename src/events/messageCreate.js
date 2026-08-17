@@ -3,8 +3,8 @@ import { Events } from 'discord.js';
 import { logger } from '../utils/logger.js';
 
 import {
-  getLevelingConfig,
-  getUserLevelData,
+    getLevelingConfig,
+    getUserLevelData,
 } from '../services/leveling/leveling.js';
 
 import { addXp } from '../services/leveling/xpSystem.js';
@@ -14,878 +14,1067 @@ import { checkRateLimit } from '../utils/rateLimiter.js';
 import { parsePrefixCommand } from '../utils/prefixParser.js';
 
 import {
-  supportsPrefixExecution,
-  executePrefixCommand,
-  resolvePrefixAccessKey,
+    supportsPrefixExecution,
+    executePrefixCommand,
+    resolvePrefixAccessKey,
 } from '../utils/messageAdapter.js';
 
 import {
-  resolveCommandAlias,
-  resolveSubcommandAlias,
+    resolveCommandAlias,
+    resolveSubcommandAlias,
 } from '../config/commands/commandAliases.js';
 
 import {
-  getPrefixRestriction,
+    getPrefixRestriction,
 } from '../config/commands/prefixRestrictions.js';
 
-import { getGuildConfig } from '../services/config/guildConfig.js';
+import {
+    getGuildConfig,
+} from '../services/config/guildConfig.js';
 
 import {
-  getCommandPrefix,
-  getBotMessage,
-  isBotOwner,
-  isCommandCategoryEnabled,
-  isMaintenanceMode,
+    getCommandPrefix,
+    getBotMessage,
+    isBotOwner,
+    isCommandCategoryEnabled,
+    isMaintenanceMode,
 } from '../config/bot.js';
 
 import {
-  enforceAbuseProtection,
-  formatCooldownDuration,
+    enforceAbuseProtection,
+    formatCooldownDuration,
 } from '../utils/abuseProtection.js';
 
 import { createEmbed } from '../utils/embeds.js';
 
-import { isCommandEnabled } from '../services/commandAccessService.js';
+import {
+    isCommandEnabled,
+} from '../services/commandAccessService.js';
 
 import {
-  getCountingGameConfig,
-  saveCountingGameConfig,
-  isValidCountingMessage,
-  recordCorrectCount,
+    getCountingGameConfig,
+    saveCountingGameConfig,
+    isValidCountingMessage,
+    recordCorrectCount,
 } from '../services/countingGameService.js';
 
-// ===============================
-// AUTORESPONDER SERVICE
-// ===============================
+import {
+    AutoresponderService,
+} from '../services/autoresponderService.js';
 
-import { AutoresponderService } from '../services/autoresponderService.js';
-
-
-// ===============================
-// CONSTANTS
-// ===============================
 
 const MESSAGE_XP_RATE_LIMIT_ATTEMPTS = 12;
+
 const MESSAGE_XP_RATE_LIMIT_WINDOW_MS = 10000;
 
 
-// ===============================
-// MESSAGE CREATE EVENT
-// ===============================
+/*
+|--------------------------------------------------------------------------
+| MESSAGE CREATE
+|--------------------------------------------------------------------------
+*/
 
 export default {
-  name: Events.MessageCreate,
+    name: Events.MessageCreate,
 
-  async execute(message, client) {
+    async execute(message, client) {
+        try {
 
-    console.log(
-        `[MESSAGE_CREATE TEST] ${message.author?.tag} -> ${JSON.stringify(message.content)}`
-    );
+            /*
+            |--------------------------------------------------------------------------
+            | IGNORE BOTS AND DMs
+            |--------------------------------------------------------------------------
+            */
 
-    try {
-        // Ignore bots and DMs
-        if (message.author.bot || !message.guild) {
-            return;
+            if (
+                message.author?.bot ||
+                !message.guild
+            ) {
+                return;
+            }
+
+
+            /*
+            |--------------------------------------------------------------------------
+            | DEBUG LOG
+            |--------------------------------------------------------------------------
+            */
+
+            logger.debug(
+                `Message received from ${message.author.tag}: ${message.content}`
+            );
+
+
+            /*
+            |--------------------------------------------------------------------------
+            | COUNTING GAME
+            |--------------------------------------------------------------------------
+            */
+
+            const countingProcessed =
+                await handleCountingGame(
+                    message,
+                    client
+                );
+
+            if (countingProcessed) {
+                return;
+            }
+
+
+            /*
+            |--------------------------------------------------------------------------
+            | AUTORESPONDER
+            |--------------------------------------------------------------------------
+            */
+
+            await handleAutoresponder(
+                message,
+                client
+            );
+
+
+            /*
+            |--------------------------------------------------------------------------
+            | PREFIX COMMAND
+            |--------------------------------------------------------------------------
+            */
+
+            await handlePrefixCommand(
+                message,
+                client
+            );
+
+
+            /*
+            |--------------------------------------------------------------------------
+            | LEVELING
+            |--------------------------------------------------------------------------
+            */
+
+            await handleLeveling(
+                message,
+                client
+            );
+
+        } catch (error) {
+
+            logger.error(
+                'Error in messageCreate event:',
+                error
+            );
+
         }
-
-        // rest of your existing code...
-    try {
-      // Ignore bots and DMs
-      if (message.author.bot || !message.guild) {
-        return;
-      }
-
-      logger.debug(
-        `Message received from ${message.author.tag}: ${message.content}`
-      );
-
-
-      // ===============================
-      // COUNTING GAME
-      // ===============================
-
-      const countingProcessed = await handleCountingGame(
-        message,
-        client
-      );
-
-      if (countingProcessed) {
-        return;
-      }
-
-
-      // ===============================
-      // AUTORESPONDER
-      // ===============================
-
-      await handleAutoresponder(message, client);
-
-
-      // ===============================
-      // PREFIX COMMANDS
-      // ===============================
-
-      await handlePrefixCommand(message, client);
-
-
-      // ===============================
-      // LEVELING
-      // ===============================
-
-      await handleLeveling(message, client);
-
-    } catch (error) {
-      logger.error(
-        'Error in messageCreate event:',
-        error
-      );
-    }
-  },
+    },
 };
 
 
-// ============================================================
-// AUTORESPONDER
-// ============================================================
-
-async function handleAutoresponder(message, client) {
-  try {
-
-    // Ignore empty messages
-    if (!message.content?.trim()) {
-      return;
-    }
-
-
-    // Check PostgreSQL for matching autoresponders
-    const responders =
-      await AutoresponderService.findMatches(
-        message.guild.id,
-        message.content
-      );
-
-
-    // Nothing matched
-    if (!responders.length) {
-      return;
-    }
-
-
-    // The SQL query sorts by trigger length,
-    // so the longest / most specific trigger wins.
-    const responder = responders[0];
-
-
-    // Send response
-    await message.reply({
-      content: responder.response,
-
-      allowedMentions: {
-        repliedUser: false,
-      },
-    });
-
-
-    logger.debug(
-      `Autoresponder triggered: "${responder.trigger}" ` +
-      `in guild ${message.guild.id} ` +
-      `by ${message.author.tag}`
-    );
-
-  } catch (error) {
-
-    logger.error(
-      'Error handling autoresponder:',
-      error
-    );
-
-  }
-}
-
-
-// ============================================================
-// PREFIX COMMAND HANDLER
-// ============================================================
-
-async function handlePrefixCommand(message, client) {
-  try {
-
-    const guildConfig =
-      await getGuildConfig(
-        client,
-        message.guild.id
-      );
-
-    const prefix =
-      guildConfig?.prefix ||
-      getCommandPrefix();
-
-    const parsed =
-      parsePrefixCommand(
-        message.content,
-        prefix
-      );
-
-
-    if (!parsed) {
-      return;
-    }
-
-
-    let {
-      commandName,
-      args,
-    } = parsed;
-
-
-    // ===============================
-    // MUSIC PREFIX SHORTCUTS
-    // ===============================
-
-    const musicPrefixShortcut =
-      commandName.toLowerCase();
-
-    const MUSIC_PREFIX_SHORTCUTS =
-      new Set([
-        'leave',
-        'pause',
-        'resume',
-        'skip',
-        'stop',
-        'volume',
-      ]);
-
-
-    if (
-      MUSIC_PREFIX_SHORTCUTS.has(
-        musicPrefixShortcut
-      )
-    ) {
-
-      commandName = 'music';
-
-      args = [
-        musicPrefixShortcut,
-        ...args,
-      ];
-
-    }
-
-
-    logger.info(
-      `Prefix command detected: ${commandName}, ` +
-      `args: ${args.join(', ')}`
-    );
-
-
-    // ===============================
-    // COMMAND ALIAS
-    // ===============================
-
-    const resolvedCommandName =
-      resolveCommandAlias(
-        commandName
-      );
-
-
-    logger.info(
-      `Resolved command name: ${resolvedCommandName}`
-    );
-
-
-    const command =
-      client.commands.get(
-        resolvedCommandName
-      );
-
-
-    if (!command) {
-
-      logger.warn(
-        `Command not found: ${resolvedCommandName}`
-      );
-
-      return;
-    }
-
-
-    // ===============================
-    // MAINTENANCE MODE
-    // ===============================
-
-    if (
-      isMaintenanceMode() &&
-      !isBotOwner(message.author.id)
-    ) {
-
-      await message.channel.send({
-        embeds: [
-          createEmbed({
-            title: 'Maintenance Mode',
-            description:
-              getBotMessage(
-                'maintenanceMode'
-              ),
-            color: 'warning',
-          }),
-        ],
-      }).catch(() => {});
-
-      return;
-    }
-
-
-    // ===============================
-    // CATEGORY ENABLED
-    // ===============================
-
-    if (
-      !isCommandCategoryEnabled(
-        command.category
-      )
-    ) {
-
-      await message.channel.send({
-        embeds: [
-          createEmbed({
-            title: 'Feature Disabled',
-            description:
-              getBotMessage(
-                'commandDisabled'
-              ),
-            color: 'error',
-          }),
-        ],
-      }).catch(() => {});
-
-      return;
-    }
-
-
-    // ===============================
-    // PREFIX RESTRICTION
-    // ===============================
-
-    const restriction =
-      getPrefixRestriction(
-        command,
-        args,
-        resolveSubcommandAlias
-      );
-
-
-    if (
-      !supportsPrefixExecution(command) ||
-      restriction.blocked
-    ) {
-
-      if (
-        restriction.blocked &&
-        restriction.reason
-      ) {
-
-        const embed = createEmbed({
-          title: 'Slash Command Only',
-
-          description:
-            `${restriction.reason}\n` +
-            `Use \`/${resolvedCommandName}\` instead.`,
-
-          color: 'info',
+/*
+|--------------------------------------------------------------------------
+| AUTORESPONDER
+|--------------------------------------------------------------------------
+*/
+
+async function handleAutoresponder(
+    message,
+    client
+) {
+    try {
+
+        /*
+        |--------------------------------------------------------------------------
+        | Ignore empty messages
+        |--------------------------------------------------------------------------
+        */
+
+        if (
+            !message.content ||
+            !message.content.trim()
+        ) {
+            return;
+        }
+
+
+        /*
+        |--------------------------------------------------------------------------
+        | Find matching responders
+        |--------------------------------------------------------------------------
+        */
+
+        const responders =
+            await AutoresponderService.findMatches(
+                message.guild.id,
+                message.content
+            );
+
+
+        /*
+        |--------------------------------------------------------------------------
+        | Nothing matched
+        |--------------------------------------------------------------------------
+        */
+
+        if (
+            !Array.isArray(responders) ||
+            responders.length === 0
+        ) {
+            return;
+        }
+
+
+        /*
+        |--------------------------------------------------------------------------
+        | Longest / most specific trigger wins
+        |--------------------------------------------------------------------------
+        */
+
+        const responder =
+            responders[0];
+
+
+        if (
+            !responder ||
+            !responder.response
+        ) {
+            return;
+        }
+
+
+        /*
+        |--------------------------------------------------------------------------
+        | Send response
+        |--------------------------------------------------------------------------
+        */
+
+        await message.reply({
+            content: responder.response,
+
+            allowedMentions: {
+                repliedUser: false,
+            },
         });
 
 
-        await message.channel.send({
-          embeds: [embed],
-        }).catch(() => {});
-
-      }
-
-      return;
-    }
-
-
-    // ===============================
-    // COMMAND ACCESS
-    // ===============================
-
-    const commandAccessKey =
-      resolvePrefixAccessKey(
-        command.data,
-        args
-      );
-
-
-    const commandEnabled =
-      await isCommandEnabled(
-        client,
-        message.guild.id,
-        commandAccessKey,
-        command.category
-      );
-
-
-    if (!commandEnabled) {
-
-      const embed = createEmbed({
-        title: 'Command Disabled',
-
-        description:
-          'This command has been disabled for this server.',
-
-        color: 'error',
-      });
-
-
-      await message.channel.send({
-        embeds: [embed],
-      }).catch(() => {});
-
-
-      return;
-    }
-
-
-    // ===============================
-    // ABUSE PROTECTION
-    // ===============================
-
-    const mockInteractionForProtection = {
-      guildId: message.guild.id,
-      user: message.author,
-    };
-
-
-    const abuseProtection =
-      await enforceAbuseProtection(
-        mockInteractionForProtection,
-        command,
-        resolvedCommandName
-      );
-
-
-    if (!abuseProtection.allowed) {
-
-      const formattedCooldown =
-        formatCooldownDuration(
-          abuseProtection.remainingMs
+        logger.debug(
+            `Autoresponder triggered: "${responder.trigger}" ` +
+            `in guild ${message.guild.id} ` +
+            `by ${message.author.tag}`
         );
 
+    } catch (error) {
 
-      const embed = createEmbed({
-        title: 'Command Cooldown',
+        logger.error(
+            'Error handling autoresponder:',
+            error
+        );
 
-        description:
-          `This command is on cooldown. ` +
-          `Please wait ${formattedCooldown} ` +
-          `before trying again.`,
-
-        color: 'error',
-      });
-
-
-      await message.channel.send({
-        embeds: [embed],
-      }).catch(() => {});
-
-
-      return;
     }
-
-
-    // ===============================
-    // EXECUTE COMMAND
-    // ===============================
-
-    logger.info(
-      `Executing prefix command: ` +
-      `${prefix}${commandName} ` +
-      `(resolved to ${resolvedCommandName}) ` +
-      `by ${message.author.tag}`
-    );
-
-
-    await executePrefixCommand(
-      command,
-      message,
-      args,
-      client,
-      prefix,
-      guildConfig
-    );
-
-  } catch (error) {
-
-    logger.error(
-      'Error handling prefix command:',
-      error
-    );
-
-  }
 }
 
 
-// ============================================================
-// COUNTING GAME
-// ============================================================
+/*
+|--------------------------------------------------------------------------
+| PREFIX COMMAND HANDLER
+|--------------------------------------------------------------------------
+*/
+
+async function handlePrefixCommand(
+    message,
+    client
+) {
+    try {
+
+        /*
+        |--------------------------------------------------------------------------
+        | Get guild prefix
+        |--------------------------------------------------------------------------
+        */
+
+        const guildConfig =
+            await getGuildConfig(
+                client,
+                message.guild.id
+            );
+
+
+        const prefix =
+            guildConfig?.prefix ||
+            getCommandPrefix();
+
+
+        /*
+        |--------------------------------------------------------------------------
+        | Parse prefix command
+        |--------------------------------------------------------------------------
+        */
+
+        const parsed =
+            parsePrefixCommand(
+                message.content,
+                prefix
+            );
+
+
+        if (!parsed) {
+            return;
+        }
+
+
+        let {
+            commandName,
+            args,
+        } = parsed;
+
+
+        /*
+        |--------------------------------------------------------------------------
+        | MUSIC PREFIX SHORTCUTS
+        |--------------------------------------------------------------------------
+        */
+
+        const musicPrefixShortcut =
+            commandName.toLowerCase();
+
+
+        const MUSIC_PREFIX_SHORTCUTS =
+            new Set([
+                'leave',
+                'pause',
+                'resume',
+                'skip',
+                'stop',
+                'volume',
+            ]);
+
+
+        if (
+            MUSIC_PREFIX_SHORTCUTS.has(
+                musicPrefixShortcut
+            )
+        ) {
+
+            commandName = 'music';
+
+            args = [
+                musicPrefixShortcut,
+                ...args,
+            ];
+
+        }
+
+
+        logger.info(
+            `Prefix command detected: ${commandName}, ` +
+            `args: ${args.join(', ')}`
+        );
+
+
+        /*
+        |--------------------------------------------------------------------------
+        | RESOLVE ALIAS
+        |--------------------------------------------------------------------------
+        */
+
+        const resolvedCommandName =
+            resolveCommandAlias(
+                commandName
+            );
+
+
+        logger.info(
+            `Resolved command name: ${resolvedCommandName}`
+        );
+
+
+        /*
+        |--------------------------------------------------------------------------
+        | FIND COMMAND
+        |--------------------------------------------------------------------------
+        */
+
+        const command =
+            client.commands.get(
+                resolvedCommandName
+            );
+
+
+        if (!command) {
+
+            logger.warn(
+                `Command not found: ${resolvedCommandName}`
+            );
+
+            return;
+        }
+
+
+        /*
+        |--------------------------------------------------------------------------
+        | MAINTENANCE MODE
+        |--------------------------------------------------------------------------
+        */
+
+        if (
+            isMaintenanceMode() &&
+            !isBotOwner(
+                message.author.id
+            )
+        ) {
+
+            await message.channel.send({
+                embeds: [
+                    createEmbed({
+                        title:
+                            'Maintenance Mode',
+
+                        description:
+                            getBotMessage(
+                                'maintenanceMode'
+                            ),
+
+                        color:
+                            'warning',
+                    }),
+                ],
+            }).catch(() => {});
+
+            return;
+        }
+
+
+        /*
+        |--------------------------------------------------------------------------
+        | CATEGORY ENABLED
+        |--------------------------------------------------------------------------
+        */
+
+        if (
+            !isCommandCategoryEnabled(
+                command.category
+            )
+        ) {
+
+            await message.channel.send({
+                embeds: [
+                    createEmbed({
+                        title:
+                            'Feature Disabled',
+
+                        description:
+                            getBotMessage(
+                                'commandDisabled'
+                            ),
+
+                        color:
+                            'error',
+                    }),
+                ],
+            }).catch(() => {});
+
+            return;
+        }
+
+
+        /*
+        |--------------------------------------------------------------------------
+        | PREFIX RESTRICTION
+        |--------------------------------------------------------------------------
+        */
+
+        const restriction =
+            getPrefixRestriction(
+                command,
+                args,
+                resolveSubcommandAlias
+            );
+
+
+        if (
+            !supportsPrefixExecution(
+                command
+            ) ||
+            restriction.blocked
+        ) {
+
+            if (
+                restriction.blocked &&
+                restriction.reason
+            ) {
+
+                const embed =
+                    createEmbed({
+                        title:
+                            'Slash Command Only',
+
+                        description:
+                            `${restriction.reason}\n` +
+                            `Use \`/${resolvedCommandName}\` instead.`,
+
+                        color:
+                            'info',
+                    });
+
+
+                await message.channel.send({
+                    embeds: [embed],
+                }).catch(() => {});
+
+            }
+
+            return;
+        }
+
+
+        /*
+        |--------------------------------------------------------------------------
+        | COMMAND ACCESS
+        |--------------------------------------------------------------------------
+        */
+
+        const commandAccessKey =
+            resolvePrefixAccessKey(
+                command.data,
+                args
+            );
+
+
+        const commandEnabled =
+            await isCommandEnabled(
+                client,
+                message.guild.id,
+                commandAccessKey,
+                command.category
+            );
+
+
+        if (!commandEnabled) {
+
+            const embed =
+                createEmbed({
+                    title:
+                        'Command Disabled',
+
+                    description:
+                        'This command has been disabled for this server.',
+
+                    color:
+                        'error',
+                });
+
+
+            await message.channel.send({
+                embeds: [embed],
+            }).catch(() => {});
+
+
+            return;
+        }
+
+
+        /*
+        |--------------------------------------------------------------------------
+        | ABUSE PROTECTION
+        |--------------------------------------------------------------------------
+        */
+
+        const mockInteractionForProtection = {
+            guildId:
+                message.guild.id,
+
+            user:
+                message.author,
+        };
+
+
+        const abuseProtection =
+            await enforceAbuseProtection(
+                mockInteractionForProtection,
+                command,
+                resolvedCommandName
+            );
+
+
+        if (
+            !abuseProtection.allowed
+        ) {
+
+            const formattedCooldown =
+                formatCooldownDuration(
+                    abuseProtection.remainingMs
+                );
+
+
+            const embed =
+                createEmbed({
+                    title:
+                        'Command Cooldown',
+
+                    description:
+                        `This command is on cooldown. ` +
+                        `Please wait ${formattedCooldown} ` +
+                        `before trying again.`,
+
+                    color:
+                        'error',
+                });
+
+
+            await message.channel.send({
+                embeds: [embed],
+            }).catch(() => {});
+
+
+            return;
+        }
+
+
+        /*
+        |--------------------------------------------------------------------------
+        | EXECUTE PREFIX COMMAND
+        |--------------------------------------------------------------------------
+        */
+
+        logger.info(
+            `Executing prefix command: ` +
+            `${prefix}${commandName} ` +
+            `(resolved to ${resolvedCommandName}) ` +
+            `by ${message.author.tag}`
+        );
+
+
+        await executePrefixCommand(
+            command,
+            message,
+            args,
+            client,
+            prefix,
+            guildConfig
+        );
+
+    } catch (error) {
+
+        logger.error(
+            'Error handling prefix command:',
+            error
+        );
+
+    }
+}
+
+
+/*
+|--------------------------------------------------------------------------
+| COUNTING GAME
+|--------------------------------------------------------------------------
+*/
 
 async function handleCountingGame(
-  message,
-  client
+    message,
+    client
 ) {
+    try {
 
-  try {
-
-    const config =
-      await getCountingGameConfig(
-        client,
-        message.guild.id
-      );
-
-
-    // Counting game isn't enabled
-    if (
-      !config.enabled ||
-      !config.channelId ||
-      message.channel.id !== config.channelId
-    ) {
-      return false;
-    }
+        const config =
+            await getCountingGameConfig(
+                client,
+                message.guild.id
+            );
 
 
-    const content =
-      message.content.trim();
+        /*
+        |--------------------------------------------------------------------------
+        | Counting game disabled
+        |--------------------------------------------------------------------------
+        */
 
-
-    const validCount =
-      isValidCountingMessage(
-        content,
-        config
-      );
-
-
-    const invalidAttempt =
-      !validCount ||
-      message.author.id === config.lastUserId;
-
-
-    // ===============================
-    // INVALID COUNT
-    // ===============================
-
-    if (invalidAttempt) {
-
-      await message.delete()
-        .catch(() => {});
-
-
-      await saveCountingGameConfig(
-        client,
-        message.guild.id,
-        {
-          ...config,
-
-          nextNumber: 1,
-
-          lastUserId: null,
-
-          currentStreak: 0,
+        if (
+            !config?.enabled ||
+            !config.channelId ||
+            message.channel.id !==
+                config.channelId
+        ) {
+            return false;
         }
-      );
 
 
-      const failureMessage =
-        await message.channel.send(
-          `❌ Count broken by <@${message.author.id}>. ` +
-          `The sequence has been reset to **1**.`
+        const content =
+            message.content.trim();
+
+
+        const validCount =
+            isValidCountingMessage(
+                content,
+                config
+            );
+
+
+        const invalidAttempt =
+            !validCount ||
+            message.author.id ===
+                config.lastUserId;
+
+
+        /*
+        |--------------------------------------------------------------------------
+        | INVALID COUNT
+        |--------------------------------------------------------------------------
+        */
+
+        if (invalidAttempt) {
+
+            await message.delete()
+                .catch(() => {});
+
+
+            await saveCountingGameConfig(
+                client,
+                message.guild.id,
+                {
+                    ...config,
+
+                    nextNumber: 1,
+
+                    lastUserId: null,
+
+                    currentStreak: 0,
+                }
+            );
+
+
+            const failureMessage =
+                await message.channel.send(
+                    `❌ Count broken by <@${message.author.id}>. ` +
+                    `The sequence has been reset to **1**.`
+                );
+
+
+            setTimeout(() => {
+
+                failureMessage
+                    .delete()
+                    .catch(() => {});
+
+            }, 10000);
+
+
+            return true;
+        }
+
+
+        /*
+        |--------------------------------------------------------------------------
+        | CORRECT COUNT
+        |--------------------------------------------------------------------------
+        */
+
+        await recordCorrectCount(
+            client,
+            message.guild.id,
+            message.author.id
         );
 
 
-      setTimeout(() => {
+        return true;
 
-        failureMessage
-          .delete()
-          .catch(() => {});
+    } catch (error) {
 
-      }, 10000);
+        logger.error(
+            'Error handling counting game:',
+            error
+        );
 
 
-      return true;
+        return false;
     }
-
-
-    // ===============================
-    // CORRECT COUNT
-    // ===============================
-
-    await recordCorrectCount(
-      client,
-      message.guild.id,
-      message.author.id
-    );
-
-
-    return true;
-
-  } catch (error) {
-
-    logger.error(
-      'Error handling counting game:',
-      error
-    );
-
-
-    return false;
-  }
 }
 
 
-// ============================================================
-// LEVELING
-// ============================================================
+/*
+|--------------------------------------------------------------------------
+| LEVELING
+|--------------------------------------------------------------------------
+*/
 
 async function handleLeveling(
-  message,
-  client
+    message,
+    client
 ) {
+    try {
 
-  try {
+        /*
+        |--------------------------------------------------------------------------
+        | RATE LIMIT
+        |--------------------------------------------------------------------------
+        */
 
-    const rateLimitKey =
-      `xp-event:${message.guild.id}:${message.author.id}`;
-
-
-    const canProcess =
-      await checkRateLimit(
-        rateLimitKey,
-        MESSAGE_XP_RATE_LIMIT_ATTEMPTS,
-        MESSAGE_XP_RATE_LIMIT_WINDOW_MS
-      );
+        const rateLimitKey =
+            `xp-event:${message.guild.id}:${message.author.id}`;
 
 
-    if (!canProcess) {
-      return;
-    }
+        const canProcess =
+            await checkRateLimit(
+                rateLimitKey,
+                MESSAGE_XP_RATE_LIMIT_ATTEMPTS,
+                MESSAGE_XP_RATE_LIMIT_WINDOW_MS
+            );
 
 
-    // ===============================
-    // GET LEVELING CONFIG
-    // ===============================
-
-    const levelingConfig =
-      await getLevelingConfig(
-        client,
-        message.guild.id
-      );
+        if (!canProcess) {
+            return;
+        }
 
 
-    if (!levelingConfig?.enabled) {
-      return;
-    }
+        /*
+        |--------------------------------------------------------------------------
+        | GET LEVELING CONFIG
+        |--------------------------------------------------------------------------
+        */
+
+        const levelingConfig =
+            await getLevelingConfig(
+                client,
+                message.guild.id
+            );
 
 
-    // ===============================
-    // IGNORED CHANNELS
-    // ===============================
-
-    if (
-      levelingConfig.ignoredChannels?.includes(
-        message.channel.id
-      )
-    ) {
-      return;
-    }
+        if (
+            !levelingConfig?.enabled
+        ) {
+            return;
+        }
 
 
-    // ===============================
-    // IGNORED ROLES
-    // ===============================
+        /*
+        |--------------------------------------------------------------------------
+        | IGNORED CHANNELS
+        |--------------------------------------------------------------------------
+        */
 
-    if (
-      levelingConfig.ignoredRoles?.length > 0
-    ) {
-
-      const member =
-        await message.guild.members
-          .fetch(message.author.id)
-          .catch(() => {
-            return null;
-          });
-
-
-      if (
-        member &&
-        member.roles.cache.some(
-          role =>
-            levelingConfig.ignoredRoles.includes(
-              role.id
-            )
-        )
-      ) {
-        return;
-      }
-    }
+        if (
+            levelingConfig.ignoredChannels
+                ?.includes(
+                    message.channel.id
+                )
+        ) {
+            return;
+        }
 
 
-    // ===============================
-    // BLACKLISTED USERS
-    // ===============================
+        /*
+        |--------------------------------------------------------------------------
+        | IGNORED ROLES
+        |--------------------------------------------------------------------------
+        */
 
-    if (
-      levelingConfig.blacklistedUsers?.includes(
-        message.author.id
-      )
-    ) {
-      return;
-    }
+        if (
+            levelingConfig.ignoredRoles
+                ?.length > 0
+        ) {
 
-
-    // ===============================
-    // EMPTY MESSAGE
-    // ===============================
-
-    if (
-      !message.content ||
-      message.content.trim().length === 0
-    ) {
-      return;
-    }
+            const member =
+                await message.guild.members
+                    .fetch(
+                        message.author.id
+                    )
+                    .catch(() => null);
 
 
-    // ===============================
-    // USER LEVEL DATA
-    // ===============================
-
-    const userData =
-      await getUserLevelData(
-        client,
-        message.guild.id,
-        message.author.id
-      );
-
-
-    // ===============================
-    // XP COOLDOWN
-    // ===============================
-
-    const cooldownTime =
-      levelingConfig.xpCooldown || 60;
+            if (
+                member &&
+                member.roles.cache.some(
+                    role =>
+                        levelingConfig
+                            .ignoredRoles
+                            .includes(
+                                role.id
+                            )
+                )
+            ) {
+                return;
+            }
+        }
 
 
-    const now =
-      Date.now();
+        /*
+        |--------------------------------------------------------------------------
+        | BLACKLISTED USERS
+        |--------------------------------------------------------------------------
+        */
+
+        if (
+            levelingConfig.blacklistedUsers
+                ?.includes(
+                    message.author.id
+                )
+        ) {
+            return;
+        }
 
 
-    const timeSinceLastMessage =
-      now -
-      (userData.lastMessage || 0);
+        /*
+        |--------------------------------------------------------------------------
+        | EMPTY MESSAGE
+        |--------------------------------------------------------------------------
+        */
+
+        if (
+            !message.content ||
+            message.content.trim()
+                .length === 0
+        ) {
+            return;
+        }
 
 
-    if (
-      timeSinceLastMessage <
-      cooldownTime * 1000
-    ) {
-      return;
-    }
+        /*
+        |--------------------------------------------------------------------------
+        | GET USER DATA
+        |--------------------------------------------------------------------------
+        */
+
+        const userData =
+            await getUserLevelData(
+                client,
+                message.guild.id,
+                message.author.id
+            );
 
 
-    // ===============================
-    // XP RANGE
-    // ===============================
+        /*
+        |--------------------------------------------------------------------------
+        | XP COOLDOWN
+        |--------------------------------------------------------------------------
+        */
 
-    const minXP =
-      levelingConfig.xpRange?.min ||
-      levelingConfig.xpPerMessage?.min ||
-      15;
-
-
-    const maxXP =
-      levelingConfig.xpRange?.max ||
-      levelingConfig.xpPerMessage?.max ||
-      25;
+        const cooldownTime =
+            levelingConfig.xpCooldown ||
+            60;
 
 
-    const safeMinXP =
-      Math.max(
-        1,
-        minXP
-      );
+        const now =
+            Date.now();
 
 
-    const safeMaxXP =
-      Math.max(
-        safeMinXP,
-        maxXP
-      );
+        const timeSinceLastMessage =
+            now -
+            (userData.lastMessage || 0);
 
 
-    const xpToGive =
-      Math.floor(
-        Math.random() *
-        (
-          safeMaxXP -
-          safeMinXP +
-          1
-        )
-      ) +
-      safeMinXP;
+        if (
+            timeSinceLastMessage <
+            cooldownTime * 1000
+        ) {
+            return;
+        }
 
 
-    // ===============================
-    // XP MULTIPLIER
-    // ===============================
+        /*
+        |--------------------------------------------------------------------------
+        | XP RANGE
+        |--------------------------------------------------------------------------
+        */
 
-    let finalXP =
-      xpToGive;
+        const minXP =
+            levelingConfig.xpRange?.min ||
+            levelingConfig.xpPerMessage?.min ||
+            15;
 
 
-    if (
-      levelingConfig.xpMultiplier &&
-      levelingConfig.xpMultiplier > 1
-    ) {
+        const maxXP =
+            levelingConfig.xpRange?.max ||
+            levelingConfig.xpPerMessage?.max ||
+            25;
 
-      finalXP =
-        Math.floor(
-          finalXP *
-          levelingConfig.xpMultiplier
+
+        const safeMinXP =
+            Math.max(
+                1,
+                minXP
+            );
+
+
+        const safeMaxXP =
+            Math.max(
+                safeMinXP,
+                maxXP
+            );
+
+
+        const xpToGive =
+            Math.floor(
+                Math.random() *
+                (
+                    safeMaxXP -
+                    safeMinXP +
+                    1
+                )
+            ) +
+            safeMinXP;
+
+
+        /*
+        |--------------------------------------------------------------------------
+        | XP MULTIPLIER
+        |--------------------------------------------------------------------------
+        */
+
+        let finalXP =
+            xpToGive;
+
+
+        if (
+            levelingConfig.xpMultiplier &&
+            levelingConfig.xpMultiplier > 1
+        ) {
+
+            finalXP =
+                Math.floor(
+                    finalXP *
+                    levelingConfig.xpMultiplier
+                );
+
+        }
+
+
+        /*
+        |--------------------------------------------------------------------------
+        | ADD XP
+        |--------------------------------------------------------------------------
+        */
+
+        const result =
+            await addXp(
+                client,
+                message.guild,
+                message.member,
+                finalXP
+            );
+
+
+        /*
+        |--------------------------------------------------------------------------
+        | LEVEL UP
+        |--------------------------------------------------------------------------
+        */
+
+        if (
+            result?.leveledUp
+        ) {
+
+            logger.info(
+                `${message.author.tag} ` +
+                `leveled up to level ${result.level} ` +
+                `in ${message.guild.name}`
+            );
+
+        }
+
+    } catch (error) {
+
+        logger.error(
+            'Error handling leveling for message:',
+            error
         );
 
     }
-
-
-    // ===============================
-    // ADD XP
-    // ===============================
-
-    const result =
-      await addXp(
-        client,
-        message.guild,
-        message.member,
-        finalXP
-      );
-
-
-    // ===============================
-    // LEVEL UP
-    // ===============================
-
-    if (result?.leveledUp) {
-
-      logger.info(
-        `${message.author.tag} ` +
-        `leveled up to level ${result.level} ` +
-        `in ${message.guild.name}`
-      );
-
-    }
-
-  } catch (error) {
-
-    logger.error(
-      'Error handling leveling for message:',
-      error
-    );
-
-  }
 }
