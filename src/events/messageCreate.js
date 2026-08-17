@@ -77,6 +77,18 @@ export default {
   name: Events.MessageCreate,
 
   async execute(message, client) {
+
+    console.log(
+        `[MESSAGE_CREATE TEST] ${message.author?.tag} -> ${JSON.stringify(message.content)}`
+    );
+
+    try {
+        // Ignore bots and DMs
+        if (message.author.bot || !message.guild) {
+            return;
+        }
+
+        // rest of your existing code...
     try {
       // Ignore bots and DMs
       if (message.author.bot || !message.guild) {
