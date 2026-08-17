@@ -10,91 +10,179 @@ import { logger } from '../../utils/logger.js';
 export default {
     data: new SlashCommandBuilder()
         .setName('giverole')
-        .setDescription('Give any role to a member')
+        .setDescription('Give a role to a member')
+
         .addUserOption(option =>
             option
                 .setName('user')
                 .setDescription('Member to give the role to')
                 .setRequired(true)
         )
-        .addStringOption(option =>
+
+        .addRoleOption(option =>
             option
                 .setName('role')
-                .setDescription('Role name (e.g. Staff, Founder, VIP)')
+                .setDescription('Role to give')
                 .setRequired(true)
         )
-        .setDefaultMemberPermissions(PermissionFlagsBits.ManageRoles),
+
+        .setDefaultMemberPermissions(
+            PermissionFlagsBits.ManageRoles
+        ),
 
     category: 'utility',
 
     async execute(interaction) {
-        const defer = await InteractionHelper.safeDefer(interaction);
+        const deferSuccess =
+            await InteractionHelper.safeDefer(interaction);
 
-        if (!defer) return;
+        if (!deferSuccess) {
+            logger.warn('Failed to defer giverole interaction', {
+                userId: interaction.user.id,
+                guildId: interaction.guildId
+            });
+
+            return;
+        }
 
         try {
-            const target = interaction.options.getUser('user');
-            const roleName = interaction.options.getString('role');
+            // Get the selected Discord user
+            const targetUser =
+                interaction.options.getUser('user');
 
-            const member = await interaction.guild.members.fetch(target.id);
+            // Get the actual Discord role
+            const role =
+                interaction.options.getRole('role');
 
-            const role = interaction.guild.roles.cache.find(
-                r => r.name.toLowerCase() === roleName.toLowerCase()
-            );
-
-            if (!role) {
+            if (!targetUser) {
                 return InteractionHelper.safeEditReply(interaction, {
                     embeds: [
                         createEmbed({
-                            title: 'Role Not Found',
-                            description: `No role named **${roleName}** exists in this server.`,
+                            title: 'Invalid User',
+                            description:
+                                '❌ Please select a valid member.',
                             color: 'error'
                         })
                     ]
                 });
             }
 
+            if (!role) {
+                return InteractionHelper.safeEditReply(interaction, {
+                    embeds: [
+                        createEmbed({
+                            title: 'Invalid Role',
+                            description:
+                                '❌ Please select a valid role.',
+                            color: 'error'
+                        })
+                    ]
+                });
+            }
+
+            // Fetch the member
+            const member =
+                await interaction.guild.members
+                    .fetch(targetUser.id)
+                    .catch(() => null);
+
+            if (!member) {
+                return InteractionHelper.safeEditReply(interaction, {
+                    embeds: [
+                        createEmbed({
+                            title: 'Member Not Found',
+                            description:
+                                '❌ I could not find that member in this server.',
+                            color: 'error'
+                        })
+                    ]
+                });
+            }
+
+            // Check bot permissions
+            const botMember =
+                interaction.guild.members.me;
+
+            if (!botMember) {
+                return InteractionHelper.safeEditReply(interaction, {
+                    embeds: [
+                        createEmbed({
+                            title: 'Error',
+                            description:
+                                '❌ I could not find my member information.',
+                            color: 'error'
+                        })
+                    ]
+                });
+            }
+
+            if (
+                !botMember.permissions.has(
+                    PermissionFlagsBits.ManageRoles
+                )
+            ) {
+                return InteractionHelper.safeEditReply(interaction, {
+                    embeds: [
+                        createEmbed({
+                            title: 'Missing Permission',
+                            description:
+                                '❌ I need the **Manage Roles** permission.',
+                            color: 'error'
+                        })
+                    ]
+                });
+            }
+
+            // Managed roles cannot be manually assigned
+            if (role.managed) {
+                return InteractionHelper.safeEditReply(interaction, {
+                    embeds: [
+                        createEmbed({
+                            title: 'Cannot Give Role',
+                            description:
+                                `❌ **${role.name}** is a managed role and cannot be manually assigned.`,
+                            color: 'error'
+                        })
+                    ]
+                });
+            }
+
+            // Discord role hierarchy check
+            if (
+                role.position >=
+                botMember.roles.highest.position
+            ) {
+                return InteractionHelper.safeEditReply(interaction, {
+                    embeds: [
+                        createEmbed({
+                            title: 'Role Too High',
+                            description:
+                                `❌ I cannot give **${role.name}** because it is higher than or equal to my highest role.\n\n` +
+                                `Move my highest bot role **above ${role.name}** in Server Settings → Roles.`,
+                            color: 'error'
+                        })
+                    ]
+                });
+            }
+
+            // Check if user already has role
             if (member.roles.cache.has(role.id)) {
                 return InteractionHelper.safeEditReply(interaction, {
                     embeds: [
                         createEmbed({
                             title: 'Already Has Role',
-                            description: `${member} already has **${role.name}**.`,
+                            description:
+                                `⚠️ ${member} already has **${role.name}**.`,
                             color: 'warning'
                         })
                     ]
                 });
             }
 
-            const botMember = interaction.guild.members.me;
-
-            if (!botMember.permissions.has(PermissionFlagsBits.ManageRoles)) {
-                return InteractionHelper.safeEditReply(interaction, {
-                    embeds: [
-                        createEmbed({
-                            title: 'Missing Permission',
-                            description: 'I need the **Manage Roles** permission.',
-                            color: 'error'
-                        })
-                    ]
-                });
-            }
-
-            if (role.position >= botMember.roles.highest.position) {
-                return InteractionHelper.safeEditReply(interaction, {
-                    embeds: [
-                        createEmbed({
-                            title: 'Role Too High',
-                            description: `I cannot give **${role.name}** because it is above my highest role.`,
-                            color: 'error'
-                        })
-                    ]
-                });
-            }
-
+            // Give role
             await member.roles.add(
                 role,
-                `Given by ${interaction.user.tag}`
+                `Role given by ${interaction.user.tag}`
             );
 
             logger.info(
@@ -104,22 +192,29 @@ export default {
             return InteractionHelper.safeEditReply(interaction, {
                 embeds: [
                     createEmbed({
-                        title: 'Role Given',
+                        title: 'Role Given Successfully',
                         description:
-                            `Successfully gave **${role.name}** to ${member}.`,
+                            `✅ Successfully gave **${role.name}** to ${member}.\n\n` +
+                            `**Role:** ${role}\n` +
+                            `**Member:** ${member}\n` +
+                            `**Moderator:** ${interaction.user}`,
                         color: 'success'
                     })
                 ]
             });
 
         } catch (error) {
-            logger.error('giverole command failed', error);
+            logger.error(
+                'giverole command failed:',
+                error
+            );
 
             return InteractionHelper.safeEditReply(interaction, {
                 embeds: [
                     createEmbed({
                         title: 'Error',
-                        description: 'Failed to give the role.',
+                        description:
+                            '❌ Something went wrong while giving the role.',
                         color: 'error'
                     })
                 ]
